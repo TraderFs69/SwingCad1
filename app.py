@@ -17,11 +17,11 @@ TOP_N = 15
 W_S1, W_S2, W_S3, W_S4 = 0.30, 0.25, 0.25, 0.20
 
 # =====================================================
-# LOAD TICKERS — TSX COMPOSITE
+# LOAD TICKERS — TSX COMPOSITE (CHEMIN CORRIGÉ)
 # =====================================================
 @st.cache_data
 def load_tickers():
-    df = pd.read_excel("/mnt/data/tsxcomposite_constituents.xlsx")
+    df = pd.read_excel("tsxcomposite_constituents.xlsx")  # 👈 chemin RELATIF
     tickers = (
         df.iloc[:, 0]
         .dropna()
@@ -31,7 +31,7 @@ def load_tickers():
         .unique()
         .tolist()
     )
-    # Yahoo Finance utilise .TO pour le TSX
+    # Yahoo Finance → .TO
     return [t if t.endswith(".TO") else f"{t}.TO" for t in tickers]
 
 TICKERS = load_tickers()
@@ -91,7 +91,7 @@ def ATR(df, n=14):
     return tr.rolling(n).mean()
 
 # =====================================================
-# STRATEGY 4 (TA VERSION)
+# STRATEGY 4 (TA LOGIQUE)
 # =====================================================
 def strategy4(df):
     if len(df) < 60:
@@ -114,19 +114,14 @@ def strategy4(df):
     return round(s / 6 * 100, 2)
 
 # =====================================================
-# PLACEHOLDERS (remplace-les par tes vraies stratégies)
+# PLACEHOLDERS (à remplacer plus tard)
 # =====================================================
-def strategy1(df):
-    return 50
-
-def strategy2(df):
-    return 50
-
-def strategy3(df):
-    return 50
+def strategy1(df): return 50
+def strategy2(df): return 50
+def strategy3(df): return 50
 
 # =====================================================
-# SCORE GLOBAL (OFFSET) ✅ CORRIGÉ
+# SCORE GLOBAL (OFFSET)
 # =====================================================
 def compute_score(df, offset):
     df = df.iloc[:offset]
@@ -148,8 +143,7 @@ def compute_score(df, offset):
 # SCAN — NOUVEAUX ENTRANTS UNIQUEMENT
 # =====================================================
 def scan_universe(tickers):
-    today = []
-    yesterday = []
+    today, yesterday = [], []
 
     for t in tickers:
         df = get_ohlc(t)
@@ -204,12 +198,7 @@ def send_to_discord(df):
 # =====================================================
 st.title("🇨🇦 Swing Scanner — Nouveaux entrants TSX (Yahoo Finance)")
 
-limit = st.slider(
-    "Nombre de tickers à scanner",
-    50,
-    len(TICKERS),
-    300
-)
+limit = st.slider("Nombre de tickers à scanner", 50, len(TICKERS), 300)
 
 if st.button("🚀 Lancer le scan et envoyer sur Discord"):
     with st.spinner("Scan en cours…"):
