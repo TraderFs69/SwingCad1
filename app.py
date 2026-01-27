@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import requests
+import time
 
 # =====================================================
 # CONFIG
@@ -14,14 +15,17 @@ DISCORD_WEBHOOK = st.secrets.get("DISCORD_WEBHOOK_CANADA")
 LOOKBACK = 200
 TOP_N = 15
 
+BATCH_SIZE = 40
+SLEEP_PER_TICKER = 0.4
+
 W_S1, W_S2, W_S3, W_S4 = 0.30, 0.25, 0.25, 0.20
 
 # =====================================================
-# LOAD TICKERS — TSX COMPOSITE (CHEMIN CORRIGÉ)
+# LOAD TICKERS — TSX
 # =====================================================
 @st.cache_data
 def load_tickers():
-    df = pd.read_excel("tsxcomposite_constituents.xlsx")  # 👈 chemin RELATIF
+    df = pd.read_excel("tsxcomposite_constituents.xlsx")
     tickers = (
         df.iloc[:, 0]
         .dropna()
@@ -31,25 +35,24 @@ def load_tickers():
         .unique()
         .tolist()
     )
-    # Yahoo Finance → .TO
     return [t if t.endswith(".TO") else f"{t}.TO" for t in tickers]
 
 TICKERS = load_tickers()
 
 # =====================================================
-# YAHOO FINANCE — OHLC
+# YAHOO FINANCE — SAFE
 # =====================================================
 @st.cache_data(ttl=3600)
 def get_ohlc(ticker):
     try:
         df = yf.download(
             ticker,
-            period=f"{LOOKBACK + 5}d",
+            period=f"{LOOKBACK+5}d",
             interval="1d",
             auto_adjust=False,
-            progress=False
+            progress=False,
+            threads=False
         )
-
         if df.empty or len(df) < LOOKBACK:
             return None
 
@@ -60,42 +63,17 @@ def get_ohlc(ticker):
             "Close": "Close",
             "Volume": "v"
         })
-
         return df[["o", "h", "l", "Close", "v"]]
 
     except Exception:
         return None
 
 # =====================================================
-# INDICATEURS
-# =====================================================
-def EMA(s, n):
-    return s.ewm(span=n, adjust=False).mean()
-
-def ROC(s, n):
-    return s.pct_change(n) * 100
-
-def RSI(s, n=14):
-    d = s.diff()
-    g = d.clip(lower=0)
-    l = -d.clip(upper=0)
-    rs = g.rolling(n).mean() / l.rolling(n).mean()
-    return 100 - (100 / (1 + rs))
-
-def ATR(df, n=14):
-    tr = pd.concat([
-        df["h"] - df["l"],
-        (df["h"] - df["Close"].shift()).abs(),
-        (df["l"] - df["Close"].shift()).abs()
-    ], axis=1).max(axis=1)
-    return tr.rolling(n).mean()
-
-# =====================================================
-# STRATEGY 4 (TA LOGIQUE)
+# STRATEGY 4
 # =====================================================
 def strategy4(df):
     if len(df) < 60:
-        return 0
+        return np.nan
 
     close = df["Close"]
     rv = df["v"] / df["v"].rolling(20).mean()
@@ -114,52 +92,87 @@ def strategy4(df):
     return round(s / 6 * 100, 2)
 
 # =====================================================
-# PLACEHOLDERS (à remplacer plus tard)
+# PLACEHOLDERS STABLES
 # =====================================================
 def strategy1(df): return 50
 def strategy2(df): return 50
 def strategy3(df): return 50
 
 # =====================================================
-# SCORE GLOBAL (OFFSET)
+# SCORE GLOBAL (SAFE)
 # =====================================================
 def compute_score(df, offset):
-    df = df.iloc[:offset]
+    try:
+        df = df.iloc[:offset]
 
-    s1 = strategy1(df)
-    s2 = strategy2(df)
-    s3 = strategy3(df)
-    s4 = strategy4(df)
+        scores = [
+            strategy1(df),
+            strategy2(df),
+            strategy3(df),
+            strategy4(df)
+        ]
 
-    return round(
-        W_S1 * s1 +
-        W_S2 * s2 +
-        W_S3 * s3 +
-        W_S4 * s4,
-        2
-    )
+        if any(pd.isna(s) for s in scores):
+            return np.nan
+
+        return round(
+            W_S1*scores[0] +
+            W_S2*scores[1] +
+            W_S3*scores[2] +
+            W_S4*scores[3],
+            2
+        )
+    except Exception:
+        return np.nan
 
 # =====================================================
-# SCAN — NOUVEAUX ENTRANTS UNIQUEMENT
+# BATCH STATE
 # =====================================================
-def scan_universe(tickers):
+if "batch_index" not in st.session_state:
+    st.session_state.batch_index = 0
+
+# =====================================================
+# SCAN PAR BATCH — ULTRA ROBUSTE
+# =====================================================
+def scan_batch(tickers):
+    start = st.session_state.batch_index
+    end = start + BATCH_SIZE
+    batch = tickers[start:end]
+
     today, yesterday = [], []
 
-    for t in tickers:
+    for t in batch:
         df = get_ohlc(t)
+        time.sleep(SLEEP_PER_TICKER)
+
         if df is None:
             continue
-
-        price = round(df["Close"].iloc[-1], 2)
 
         score_today = compute_score(df, -1)
         score_yesterday = compute_score(df, -2)
 
+        if pd.isna(score_today) or pd.isna(score_yesterday):
+            continue
+
+        price = round(df["Close"].iloc[-1], 2)
+
         today.append([t, price, score_today])
         yesterday.append([t, score_yesterday])
 
+    if not today or not yesterday:
+        return pd.DataFrame()
+
     df_today = pd.DataFrame(today, columns=["Ticker", "Price", "Score"])
     df_yesterday = pd.DataFrame(yesterday, columns=["Ticker", "Score_Y"])
+
+    df_today["Score"] = pd.to_numeric(df_today["Score"], errors="coerce")
+    df_yesterday["Score_Y"] = pd.to_numeric(df_yesterday["Score_Y"], errors="coerce")
+
+    df_today.dropna(inplace=True)
+    df_yesterday.dropna(inplace=True)
+
+    if df_today.empty or df_yesterday.empty:
+        return pd.DataFrame()
 
     top_today = df_today.sort_values("Score", ascending=False).head(TOP_N)
     top_yesterday = df_yesterday.sort_values("Score_Y", ascending=False).head(TOP_N)
@@ -171,42 +184,39 @@ def scan_universe(tickers):
     return new_entries.sort_values("Score", ascending=False)
 
 # =====================================================
-# DISCORD — CANADA
+# ADVANCE BATCH
 # =====================================================
-def send_to_discord(df):
-    if not DISCORD_WEBHOOK or df.empty:
-        return
-
-    lines = [
-        f"🇨🇦 **{r['Ticker']}** @ ${r['Price']} | Score `{r['Score']}`"
-        for _, r in df.iterrows()
-    ]
-
-    payload = {
-        "content":
-        "🚨 **CANADA — Nouveaux entrants Swing Scanner (Yahoo)**\n\n" +
-        "\n".join(lines)
-    }
-
-    try:
-        requests.post(DISCORD_WEBHOOK, json=payload, timeout=5)
-    except Exception:
-        pass
+def advance_batch(total):
+    st.session_state.batch_index += BATCH_SIZE
+    if st.session_state.batch_index >= total:
+        st.session_state.batch_index = 0
 
 # =====================================================
 # UI
 # =====================================================
-st.title("🇨🇦 Swing Scanner — Nouveaux entrants TSX (Yahoo Finance)")
+st.title("🇨🇦 Swing Scanner TSX — Batch automatique (Yahoo)")
 
-limit = st.slider("Nombre de tickers à scanner", 50, len(TICKERS), 300)
+st.caption("Anti-rate-limit • Stable • Nouveaux entrants uniquement")
 
-if st.button("🚀 Lancer le scan et envoyer sur Discord"):
-    with st.spinner("Scan en cours…"):
-        df = scan_universe(TICKERS[:limit])
+if st.button("🚀 Lancer le batch"):
+    with st.spinner("Scan du batch en cours…"):
+        df = scan_batch(TICKERS)
 
         if not df.empty:
             st.dataframe(df, use_container_width=True)
-            send_to_discord(df)
-            st.success("🚀 Nouveaux entrants CANADA envoyés sur Discord")
+            send_lines = [
+                f"🇨🇦 **{r['Ticker']}** @ ${r['Price']} | Score `{r['Score']}`"
+                for _, r in df.iterrows()
+            ]
+            requests.post(
+                DISCORD_WEBHOOK,
+                json={"content": "🚨 **CANADA — Nouveaux entrants (Batch)**\n\n" + "\n".join(send_lines)},
+                timeout=5
+            )
+            st.success("🚀 Nouveaux entrants envoyés sur Discord")
         else:
-            st.info("Aucun nouveau titre dans le TOP aujourd’hui.")
+            st.info("Aucun nouvel entrant dans ce batch")
+
+        advance_batch(len(TICKERS))
+
+st.write("📦 Batch index actuel :", st.session_state.batch_index)
